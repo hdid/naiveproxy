@@ -4,6 +4,8 @@
 // found in the LICENSE file.
 #include "net/tools/naive/socks5_server_socket.h"
 
+#include "net/tools/naive/uot_v2.h"
+
 #include <cstdint>
 #include <utility>
 
@@ -101,6 +103,9 @@ void Socks5ServerSocket::Disconnect() {
     udp_socket_->Close();
     udp_socket_.reset();
   }
+  pending_udp_read_callback_.Reset();
+  udp_send_queue_.clear();
+  udp_send_pending_ = false;
   transport_->Disconnect();
 
   // Reset other states to make sure they aren't mistakenly used later.
@@ -110,11 +115,13 @@ void Socks5ServerSocket::Disconnect() {
 }
 
 bool Socks5ServerSocket::IsConnected() const {
-  return completed_handshake_ && transport_->IsConnected();
+  return completed_handshake_ && transport_->IsConnected() &&
+         (!is_udp_associate() || udp_socket_ != nullptr);
 }
 
 bool Socks5ServerSocket::IsConnectedAndIdle() const {
-  return completed_handshake_ && transport_->IsConnectedAndIdle();
+  return completed_handshake_ && transport_->IsConnectedAndIdle() &&
+         (!is_udp_associate() || udp_socket_ != nullptr);
 }
 
 const NetLogWithSource& Socks5ServerSocket::NetLog() const {
@@ -157,6 +164,26 @@ int Socks5ServerSocket::Read(IOBuffer* buf,
   DCHECK(!user_callback_);
   DCHECK(callback);
 
+  if (is_udp_associate()) {
+    if (!uot_read_buffer_.empty()) {
+      int copied = std::min(buf_len, static_cast<int>(uot_read_buffer_.size()));
+      std::memcpy(buf->data(), uot_read_buffer_.data(), copied);
+      uot_read_buffer_.erase(0, copied);
+      was_ever_used_ = true;
+      return copied;
+    }
+    pending_udp_read_buffer_ = buf;
+    pending_udp_read_length_ = buf_len;
+    pending_udp_read_callback_ = std::move(callback);
+    int udp_result = StartUdpRead();
+    if (udp_result != ERR_IO_PENDING) {
+      pending_udp_read_buffer_.reset();
+      pending_udp_read_length_ = 0;
+      pending_udp_read_callback_.Reset();
+    }
+    return udp_result;
+  }
+
   int rv = transport_->Read(
       buf, buf_len,
       base::BindOnce(&Socks5ServerSocket::OnReadWriteComplete,
@@ -178,6 +205,41 @@ int Socks5ServerSocket::Write(
   DCHECK_EQ(STATE_NONE, next_state_);
   DCHECK(!user_callback_);
   DCHECK(callback);
+
+  if (is_udp_associate()) {
+    if (buf_len <= 0 || uot_write_buffer_.size() + buf_len > 8192) {
+      return ERR_MSG_TOO_BIG;
+    }
+    uot_write_buffer_.append(buf->data(), static_cast<size_t>(buf_len));
+    for (;;) {
+      HostPortPair destination;
+      std::string payload;
+      if (!ConsumeUotV2Frame(&uot_write_buffer_, false, HostPortPair(),
+                             4096, &destination, &payload)) {
+        break;
+      }
+      size_t payload_limit = destination.port() == 53 ? 4096 : 1200;
+      if (payload.size() > payload_limit || udp_target_endpoint_.port() == 0 ||
+          udp_send_queue_.size() >= 256) {
+        continue;
+      }
+      std::string packet;
+      if (!EncodeSocks5UdpDatagram(destination, payload, &packet)) {
+        return ERR_INVALID_ARGUMENT;
+      }
+      auto packet_buffer =
+          base::MakeRefCounted<IOBufferWithSize>(packet.size());
+      std::memcpy(packet_buffer->data(), packet.data(), packet.size());
+      udp_send_queue_.push_back(
+          {std::move(packet_buffer), udp_target_endpoint_});
+    }
+    if (uot_write_buffer_.size() > 8192) {
+      return ERR_MSG_TOO_BIG;
+    }
+    was_ever_used_ = true;
+    SendNextUdpPacket();
+    return buf_len;
+  }
 
   int rv = transport_->Write(
       buf, buf_len,
@@ -694,6 +756,9 @@ int Socks5ServerSocket::DoHandshakeWriteComplete(int result) {
     if (reply_ == kReplySuccess) {
       completed_handshake_ = true;
       next_state_ = STATE_NONE;
+      if (command_ == kCommandUDPAssociate) {
+        StartUdpControlWatch();
+      }
     } else {
       net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_SERVER_ERROR,
                                      "error_code", reply_);
@@ -704,6 +769,113 @@ int Socks5ServerSocket::DoHandshakeWriteComplete(int result) {
   }
 
   return OK;
+}
+
+
+int Socks5ServerSocket::StartUdpRead() {
+  if (!udp_socket_ || !pending_udp_read_buffer_) {
+    return ERR_SOCKET_NOT_CONNECTED;
+  }
+  udp_read_buffer_ = base::MakeRefCounted<IOBufferWithSize>(65535);
+  int rv = udp_socket_->RecvFrom(
+      udp_read_buffer_.get(), 65535, &udp_source_endpoint_,
+      base::BindOnce(&Socks5ServerSocket::OnUdpReadComplete,
+                     weak_ptr_factory_.GetWeakPtr()));
+  if (rv != ERR_IO_PENDING) {
+    return ProcessUdpRead(rv);
+  }
+  return ERR_IO_PENDING;
+}
+
+int Socks5ServerSocket::ProcessUdpRead(int result) {
+  if (result <= 0) {
+    return result == 0 ? ERR_CONNECTION_CLOSED : result;
+  }
+  if (udp_source_endpoint_.address() != udp_client_endpoint_.address()) {
+    return StartUdpRead();
+  }
+
+  HostPortPair destination;
+  std::string_view payload;
+  std::string_view packet(udp_read_buffer_->data(),
+                          static_cast<size_t>(result));
+  if (!DecodeSocks5UdpDatagram(packet, &destination, &payload)) {
+    return StartUdpRead();
+  }
+  size_t payload_limit = destination.port() == 53 ? 4096 : 1200;
+  if (payload.empty() || payload.size() > payload_limit) {
+    return StartUdpRead();
+  }
+
+  udp_target_endpoint_ = udp_source_endpoint_;
+  if (!AppendUotV2Frame(false, destination, payload, &uot_read_buffer_)) {
+    return ERR_INVALID_ARGUMENT;
+  }
+  int copied = std::min(pending_udp_read_length_,
+                        static_cast<int>(uot_read_buffer_.size()));
+  std::memcpy(pending_udp_read_buffer_->data(), uot_read_buffer_.data(),
+              copied);
+  uot_read_buffer_.erase(0, copied);
+  was_ever_used_ = true;
+  return copied;
+}
+
+void Socks5ServerSocket::OnUdpReadComplete(int result) {
+  int rv = ProcessUdpRead(result);
+  if (rv == ERR_IO_PENDING) {
+    return;
+  }
+  if (pending_udp_read_callback_) {
+    pending_udp_read_buffer_.reset();
+    pending_udp_read_length_ = 0;
+    std::move(pending_udp_read_callback_).Run(rv);
+  }
+}
+
+void Socks5ServerSocket::StartUdpControlWatch() {
+  control_watch_buffer_ = base::MakeRefCounted<IOBufferWithSize>(1);
+  int rv = transport_->Read(
+      control_watch_buffer_.get(), 1,
+      base::BindOnce(&Socks5ServerSocket::OnUdpControlReadComplete,
+                     weak_ptr_factory_.GetWeakPtr()));
+  if (rv != ERR_IO_PENDING) {
+    OnUdpControlReadComplete(rv);
+  }
+}
+
+void Socks5ServerSocket::OnUdpControlReadComplete(int result) {
+  // Any data on the control connection is invalid after UDP ASSOCIATE. EOF
+  // also terminates the association and releases its UDP relay socket.
+  if (udp_socket_) {
+    udp_socket_->Close();
+    udp_socket_.reset();
+  }
+}
+
+void Socks5ServerSocket::SendNextUdpPacket() {
+  if (!udp_socket_ || udp_send_pending_) {
+    return;
+  }
+  while (!udp_send_queue_.empty()) {
+    PendingUdpPacket& packet = udp_send_queue_.front();
+    int rv = udp_socket_->SendTo(
+        packet.buffer.get(), packet.buffer->size(), packet.endpoint,
+        base::BindOnce(&Socks5ServerSocket::OnUdpSendComplete,
+                       weak_ptr_factory_.GetWeakPtr()));
+    if (rv == ERR_IO_PENDING) {
+      udp_send_pending_ = true;
+      return;
+    }
+    udp_send_queue_.pop_front();
+  }
+}
+
+void Socks5ServerSocket::OnUdpSendComplete(int result) {
+  udp_send_pending_ = false;
+  if (!udp_send_queue_.empty()) {
+    udp_send_queue_.pop_front();
+  }
+  SendNextUdpPacket();
 }
 
 int Socks5ServerSocket::GetPeerAddress(IPEndPoint* address) const {
