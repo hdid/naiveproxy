@@ -22,6 +22,7 @@
 #include "net/socket/connection_attempts.h"
 #include "net/socket/next_proto.h"
 #include "net/socket/stream_socket.h"
+#include "net/socket/udp_server_socket.h"
 #include "net/ssl/ssl_info.h"
 
 namespace net {
@@ -43,6 +44,9 @@ class Socks5ServerSocket : public StreamSocket {
   Socks5ServerSocket& operator=(const Socks5ServerSocket&) = delete;
 
   const HostPortPair& request_endpoint() const;
+  bool is_udp_associate() const { return command_ == 0x03; }
+  UDPServerSocket* udp_socket() const { return udp_socket_.get(); }
+  const IPEndPoint& udp_client_endpoint() const { return udp_client_endpoint_; }
 
   // StreamSocket implementation.
 
@@ -153,8 +157,11 @@ class Socks5ServerSocket : public StreamSocket {
   uint8_t auth_method_;
   uint8_t auth_status_;
   uint8_t reply_;
+  uint8_t command_ = 0;
 
   HostPortPair request_endpoint_;
+  std::unique_ptr<UDPServerSocket> udp_socket_;
+  IPEndPoint udp_client_endpoint_;
 
   NetLogWithSource net_log_;
 
