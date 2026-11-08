@@ -846,7 +846,7 @@ void Socks5ServerSocket::StartUdpControlWatch() {
   }
 }
 
-void Socks5ServerSocket::OnUdpControlReadComplete(int result) {
+void Socks5ServerSocket::OnUdpControlReadComplete(int /*result*/) {
   // Any data on the control connection is invalid after UDP ASSOCIATE. EOF
   // also terminates the association and releases its UDP relay socket.
   if (udp_socket_) {
@@ -873,7 +873,7 @@ void Socks5ServerSocket::SendNextUdpPacket() {
   }
 }
 
-void Socks5ServerSocket::OnUdpSendComplete(int result) {
+void Socks5ServerSocket::OnUdpSendComplete(int /*result*/) {
   udp_send_pending_ = false;
   if (!udp_send_queue_.empty()) {
     udp_send_queue_.pop_front();
