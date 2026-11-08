@@ -216,16 +216,20 @@ int Socks5ServerSocket::Write(
   DCHECK(callback);
 
   if (is_udp_associate()) {
-    if (buf_len <= 0 || uot_write_buffer_.size() + buf_len > 8192) {
+    if (buf_len <= 0 || uot_write_buffer_.size() + buf_len > 66 * 1024) {
       return ERR_MSG_TOO_BIG;
     }
     uot_write_buffer_.append(buf->data(), static_cast<size_t>(buf_len));
     for (;;) {
       HostPortPair destination;
       std::string payload;
+      size_t previous_size = uot_write_buffer_.size();
       if (!ConsumeUotV2Frame(&uot_write_buffer_, false, HostPortPair(),
                              4096, &destination, &payload)) {
-        break;
+        if (uot_write_buffer_.size() < previous_size) {
+          continue;  // Oversized datagram was consumed and dropped.
+        }
+        break;  // Incomplete frame; wait for more stream bytes.
       }
       size_t payload_limit = destination.port() == 53 ? 4096 : 1200;
       if (payload.size() > payload_limit || udp_target_endpoint_.port() == 0 ||
@@ -248,7 +252,7 @@ int Socks5ServerSocket::Write(
       udp_send_queue_.push_back(
           {std::move(packet_buffer), udp_target_endpoint_});
     }
-    if (uot_write_buffer_.size() > 8192) {
+    if (uot_write_buffer_.size() > 66 * 1024) {
       return ERR_MSG_TOO_BIG;
     }
     was_ever_used_ = true;
