@@ -66,6 +66,7 @@ class NaiveConnection {
     STATE_CONNECT_CLIENT_COMPLETE,
     STATE_CONNECT_SERVER,
     STATE_CONNECT_SERVER_COMPLETE,
+    STATE_SEND_UOT_REQUEST_COMPLETE,
     STATE_NONE,
   };
 
@@ -84,6 +85,8 @@ class NaiveConnection {
   int DoConnectClientComplete(int result);
   int DoConnectServer();
   int DoConnectServerComplete(int result);
+  int DoSendUotRequest();
+  int DoSendUotRequestComplete(int result);
   void Pull(Direction from, Direction to);
   void Push(Direction from, Direction to, int size);
   void Disconnect(Direction side);
@@ -113,6 +116,7 @@ class NaiveConnection {
 
   std::unique_ptr<StreamSocket> client_socket_;
   std::unique_ptr<ClientSocketHandle> server_socket_handle_;
+  scoped_refptr<DrainableIOBuffer> uot_request_buffer_;
 
   std::unique_ptr<NaivePaddingSocket> sockets_[kNumDirections];
   scoped_refptr<IOBuffer> read_buffers_[kNumDirections];
