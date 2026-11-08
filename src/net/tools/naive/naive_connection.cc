@@ -34,6 +34,7 @@
 #include "net/tools/naive/naive_padding_socket.h"
 #include "net/tools/naive/redirect_resolver.h"
 #include "net/tools/naive/socks5_server_socket.h"
+#include "net/tools/naive/uot_v2.h"
 #include "url/scheme_host_port.h"
 
 #if BUILDFLAG(IS_LINUX)
@@ -171,6 +172,9 @@ int NaiveConnection::DoLoop(int last_io_result) {
       case STATE_CONNECT_SERVER_COMPLETE:
         rv = DoConnectServerComplete(rv);
         break;
+      case STATE_SEND_UOT_REQUEST_COMPLETE:
+        rv = DoSendUotRequestComplete(rv);
+        break;
       default:
         rv = ERR_UNEXPECTED;
         break;
@@ -224,7 +228,11 @@ int NaiveConnection::DoConnectServer() {
   if (protocol_ == ClientProtocol::kSocks5) {
     const auto* socket =
         static_cast<const Socks5ServerSocket*>(client_socket_.get());
-    origin = socket->request_endpoint();
+    if (socket->is_udp_associate()) {
+      origin = HostPortPair(kUotV2MagicAddress, 443);
+    } else {
+      origin = socket->request_endpoint();
+    }
   } else if (protocol_ == ClientProtocol::kHttp) {
     const auto* socket =
         static_cast<const HttpProxyServerSocket*>(client_socket_.get());
@@ -306,6 +314,46 @@ int NaiveConnection::DoConnectServerComplete(int result) {
   sockets_[kServer] = std::make_unique<NaivePaddingSocket>(
       server_socket_handle_->socket(), *server_padding_type, kServer);
 
+  if (protocol_ == ClientProtocol::kSocks5 &&
+      static_cast<const Socks5ServerSocket*>(client_socket_.get())
+          ->is_udp_associate()) {
+    std::string request =
+        MakeUotV2Request(false, HostPortPair(kUotV2MagicAddress, 443));
+    if (request.empty()) {
+      return ERR_INVALID_ARGUMENT;
+    }
+    auto request_buffer =
+        base::MakeRefCounted<IOBufferWithSize>(request.size());
+    std::memcpy(request_buffer->data(), request.data(), request.size());
+    uot_request_buffer_ = base::MakeRefCounted<DrainableIOBuffer>(
+        std::move(request_buffer), request.size());
+    next_state_ = STATE_SEND_UOT_REQUEST_COMPLETE;
+    return DoSendUotRequest();
+  }
+
+  full_duplex_ = true;
+  next_state_ = STATE_NONE;
+  return OK;
+}
+
+int NaiveConnection::DoSendUotRequest() {
+  DCHECK(uot_request_buffer_);
+  DCHECK(sockets_[kServer]);
+  next_state_ = STATE_SEND_UOT_REQUEST_COMPLETE;
+  return sockets_[kServer]->Write(
+      uot_request_buffer_.get(), uot_request_buffer_->BytesRemaining(),
+      io_callback_, traffic_annotation_);
+}
+
+int NaiveConnection::DoSendUotRequestComplete(int result) {
+  if (result <= 0) {
+    return result ? result : ERR_CONNECTION_CLOSED;
+  }
+  uot_request_buffer_->DidConsume(result);
+  if (uot_request_buffer_->BytesRemaining() > 0) {
+    return DoSendUotRequest();
+  }
+  uot_request_buffer_.reset();
   full_duplex_ = true;
   next_state_ = STATE_NONE;
   return OK;
