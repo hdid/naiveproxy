@@ -47,6 +47,8 @@ static constexpr uint8_t kAuthStatusSuccess = '\x00';
 static constexpr uint8_t kAuthStatusFailure = '\xff';
 static constexpr uint8_t kReplySuccess = '\x00';
 static constexpr uint8_t kReplyCommandNotSupported = '\x07';
+static constexpr size_t kMaxGlobalUdpQueueBytes = 64 * 1024 * 1024;
+static std::atomic<size_t> g_udp_queue_bytes{0};
 
 static_assert(sizeof(struct in_addr) == 4, "incorrect system size of IPv4");
 static_assert(sizeof(struct in6_addr) == 16, "incorrect system size of IPv6");
