@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -102,6 +103,13 @@ class Socks5ServerSocket : public StreamSocket {
   };
 
   void DoCallback(int result);
+  int StartUdpRead();
+  int ProcessUdpRead(int result);
+  void OnUdpReadComplete(int result);
+  void StartUdpControlWatch();
+  void OnUdpControlReadComplete(int result);
+  void SendNextUdpPacket();
+  void OnUdpSendComplete(int result);
   void OnIOComplete(int result);
   void OnReadWriteComplete(CompletionOnceCallback callback, int result);
 
@@ -162,6 +170,20 @@ class Socks5ServerSocket : public StreamSocket {
   HostPortPair request_endpoint_;
   std::unique_ptr<UDPServerSocket> udp_socket_;
   IPEndPoint udp_client_endpoint_;
+  IPEndPoint udp_target_endpoint_;
+  scoped_refptr<IOBuffer> udp_read_buffer_;
+  scoped_refptr<IOBuffer> pending_udp_read_buffer_;
+  int pending_udp_read_length_ = 0;
+  CompletionOnceCallback pending_udp_read_callback_;
+  scoped_refptr<IOBuffer> control_watch_buffer_;
+  std::string uot_read_buffer_;
+  std::string uot_write_buffer_;
+  struct PendingUdpPacket {
+    scoped_refptr<IOBufferWithSize> buffer;
+    IPEndPoint endpoint;
+  };
+  std::deque<PendingUdpPacket> udp_send_queue_;
+  bool udp_send_pending_ = false;
 
   NetLogWithSource net_log_;
 
