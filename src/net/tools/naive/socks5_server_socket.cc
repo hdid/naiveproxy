@@ -6,7 +6,10 @@
 
 #include "net/tools/naive/uot_v2.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <string_view>
 #include <utility>
 
 #include "base/containers/extend.h"
