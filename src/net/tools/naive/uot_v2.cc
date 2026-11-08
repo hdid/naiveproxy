@@ -134,18 +134,20 @@ bool ConsumeUotV2Frame(std::string* input,
   }
   size_t size = (static_cast<uint8_t>(view[0]) << 8) |
                 static_cast<uint8_t>(view[1]);
-  if (size == 0 || size > max_payload) {
-    return false;
-  }
-  if (view.size() < size + 2) {
+  if (size == 0 || view.size() < size + 2) {
     return false;
   }
   view.remove_prefix(2);
-  payload->assign(view.substr(0, size));
+  bool oversized = size > max_payload;
+  if (oversized) {
+    payload->clear();
+  } else {
+    payload->assign(view.substr(0, size));
+  }
   size_t consumed = input->size() - (view.size() - size);
   input->erase(0, consumed);
   *destination = parsed_destination;
-  return true;
+  return !oversized;
 }
 
 bool EncodeSocks5UdpDatagram(const HostPortPair& destination,
