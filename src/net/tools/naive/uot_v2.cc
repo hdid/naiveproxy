@@ -1,9 +1,9 @@
 // Copyright 2026
 #include "net/tools/naive/uot_v2.h"
 
-#include <algorithm>
 #include <limits>
 
+#include "base/containers/span.h"
 #include "net/base/ip_address.h"
 
 namespace net {
