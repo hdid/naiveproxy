@@ -7,6 +7,7 @@
 #include "net/tools/naive/uot_v2.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <string_view>
@@ -107,6 +108,9 @@ void Socks5ServerSocket::Disconnect() {
     udp_socket_.reset();
   }
   pending_udp_read_callback_.Reset();
+  for (const auto& packet : udp_send_queue_) {
+    g_udp_queue_bytes.fetch_sub(packet.buffer->size());
+  }
   udp_send_queue_.clear();
   udp_send_pending_ = false;
   transport_->Disconnect();
@@ -233,6 +237,12 @@ int Socks5ServerSocket::Write(
       auto packet_buffer =
           base::MakeRefCounted<IOBufferWithSize>(packet.size());
       std::memcpy(packet_buffer->data(), packet.data(), packet.size());
+      size_t packet_size = packet_buffer->size();
+      size_t queued = g_udp_queue_bytes.fetch_add(packet_size);
+      if (queued > kMaxGlobalUdpQueueBytes - packet_size) {
+        g_udp_queue_bytes.fetch_sub(packet_size);
+        continue;
+      }
       udp_send_queue_.push_back(
           {std::move(packet_buffer), udp_target_endpoint_});
     }
@@ -853,6 +863,10 @@ void Socks5ServerSocket::OnUdpControlReadComplete(int /*result*/) {
     udp_socket_->Close();
     udp_socket_.reset();
   }
+  for (const auto& packet : udp_send_queue_) {
+    g_udp_queue_bytes.fetch_sub(packet.buffer->size());
+  }
+  udp_send_queue_.clear();
 }
 
 void Socks5ServerSocket::SendNextUdpPacket() {
@@ -869,6 +883,7 @@ void Socks5ServerSocket::SendNextUdpPacket() {
       udp_send_pending_ = true;
       return;
     }
+    g_udp_queue_bytes.fetch_sub(packet.buffer->size());
     udp_send_queue_.pop_front();
   }
 }
@@ -876,6 +891,7 @@ void Socks5ServerSocket::SendNextUdpPacket() {
 void Socks5ServerSocket::OnUdpSendComplete(int /*result*/) {
   udp_send_pending_ = false;
   if (!udp_send_queue_.empty()) {
+    g_udp_queue_bytes.fetch_sub(udp_send_queue_.front().buffer->size());
     udp_send_queue_.pop_front();
   }
   SendNextUdpPacket();
