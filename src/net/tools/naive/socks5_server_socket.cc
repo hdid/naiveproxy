@@ -97,6 +97,10 @@ int Socks5ServerSocket::Connect(CompletionOnceCallback callback) {
 
 void Socks5ServerSocket::Disconnect() {
   completed_handshake_ = false;
+  if (udp_socket_) {
+    udp_socket_->Close();
+    udp_socket_.reset();
+  }
   transport_->Disconnect();
 
   // Reset other states to make sure they aren't mistakenly used later.
@@ -537,11 +541,14 @@ int Socks5ServerSocket::DoHandshakeReadComplete(int result) {
       return ERR_SOCKS_CONNECTION_FAILED;
     }
     SocksCommandType command = static_cast<SocksCommandType>(buffer_[1]);
+    command_ = buffer_[1];
     if (command == kCommandConnect) {
       // The proxy replies with success immediately without first connecting
       // to the requested endpoint.
       reply_ = kReplySuccess;
-    } else if (command == kCommandBind || command == kCommandUDPAssociate) {
+    } else if (command == kCommandUDPAssociate) {
+      reply_ = kReplySuccess;
+    } else if (command == kCommandBind) {
       reply_ = kReplyCommandNotSupported;
     } else {
       net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_COMMAND,
@@ -597,6 +604,26 @@ int Socks5ServerSocket::DoHandshakeReadComplete(int result) {
       IPEndPoint endpoint(ip_addr, port_host);
       request_endpoint_ = HostPortPair::FromIPEndPoint(endpoint);
     }
+    if (command_ == kCommandUDPAssociate) {
+      IPEndPoint peer_endpoint;
+      IPEndPoint local_endpoint;
+      int rv = transport_->GetPeerAddress(&peer_endpoint);
+      if (rv != OK) {
+        return rv;
+      }
+      rv = transport_->GetLocalAddress(&local_endpoint);
+      if (rv != OK) {
+        return rv;
+      }
+      udp_client_endpoint_ = peer_endpoint;
+      udp_socket_ = std::make_unique<UDPServerSocket>(net_log_.net_log(),
+                                                       net_log_.source());
+      rv = udp_socket_->Listen(IPEndPoint(local_endpoint.address(), 0));
+      if (rv != OK) {
+        udp_socket_.reset();
+        return rv;
+      }
+    }
     buffer_.clear();
     next_state_ = STATE_HANDSHAKE_WRITE;
     return OK;
@@ -611,16 +638,36 @@ int Socks5ServerSocket::DoHandshakeWrite() {
   next_state_ = STATE_HANDSHAKE_WRITE_COMPLETE;
 
   if (buffer_.empty()) {
-    buffer_ = {
-        // clang-format off
-        kSOCKS5Version,
-        reply_,
-        kSOCKS5Reserved,
-        kEndPointResolvedIPv4,
-        0x00, 0x00, 0x00, 0x00,  // BND.ADDR
-        0x00, 0x00,  // BND.PORT
-        // clang-format on
-    };
+    if (command_ == kCommandUDPAssociate && reply_ == kReplySuccess) {
+      IPEndPoint bound_endpoint;
+      int rv = udp_socket_->GetLocalAddress(&bound_endpoint);
+      if (rv != OK) {
+        return rv;
+      }
+      buffer_ = {kSOCKS5Version, reply_, kSOCKS5Reserved};
+      if (bound_endpoint.address().IsIPv4()) {
+        buffer_.push_back(kEndPointResolvedIPv4);
+      } else {
+        buffer_.push_back(kEndPointResolvedIPv6);
+      }
+      for (uint8_t byte : bound_endpoint.address().bytes()) {
+        buffer_.push_back(byte);
+      }
+      uint16_t port = static_cast<uint16_t>(bound_endpoint.port());
+      buffer_.push_back(static_cast<uint8_t>(port >> 8));
+      buffer_.push_back(static_cast<uint8_t>(port & 0xff));
+    } else {
+      buffer_ = {
+          // clang-format off
+          kSOCKS5Version,
+          reply_,
+          kSOCKS5Reserved,
+          kEndPointResolvedIPv4,
+          0x00, 0x00, 0x00, 0x00,  // BND.ADDR
+          0x00, 0x00,  // BND.PORT
+          // clang-format on
+      };
+    }
     bytes_sent_ = 0;
   }
 
