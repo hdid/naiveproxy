@@ -231,7 +231,7 @@ int Socks5ServerSocket::Write(
         }
         break;  // Incomplete frame; wait for more stream bytes.
       }
-      size_t payload_limit = destination.port() == 53 ? 4096 : 1200;
+      size_t payload_limit = destination.port() == 53 ? 1232 : 1200;
       if (payload.size() > payload_limit || udp_target_endpoint_.port() == 0 ||
           udp_send_queue_.size() >= 256) {
         continue;
@@ -829,7 +829,7 @@ int Socks5ServerSocket::ProcessUdpRead(int result) {
   if (!DecodeSocks5UdpDatagram(packet, &destination, &payload)) {
     return StartUdpRead();
   }
-  size_t payload_limit = destination.port() == 53 ? 4096 : 1200;
+  size_t payload_limit = destination.port() == 53 ? 1232 : 1200;
   if (payload.empty() || payload.size() > payload_limit) {
     return StartUdpRead();
   }
