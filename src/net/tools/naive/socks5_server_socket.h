@@ -171,6 +171,8 @@ class Socks5ServerSocket : public StreamSocket {
   std::unique_ptr<UDPServerSocket> udp_socket_;
   IPEndPoint udp_client_endpoint_;
   IPEndPoint udp_target_endpoint_;
+  IPEndPoint udp_source_endpoint_;
+  bool udp_client_endpoint_set_ = false;
   scoped_refptr<IOBuffer> udp_read_buffer_;
   scoped_refptr<IOBuffer> pending_udp_read_buffer_;
   int pending_udp_read_length_ = 0;
