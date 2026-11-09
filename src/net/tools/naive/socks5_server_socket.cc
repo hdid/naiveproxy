@@ -813,6 +813,14 @@ int Socks5ServerSocket::ProcessUdpRead(int result) {
   if (udp_source_endpoint_.address() != udp_client_endpoint_.address()) {
     return StartUdpRead();
   }
+  if (!udp_client_endpoint_set_) {
+    // RFC 1928 allows the UDP port in the ASSOCIATE request to be zero.
+    // Pin the first valid datagram source port to prevent third-party injection.
+    udp_client_endpoint_ = udp_source_endpoint_;
+    udp_client_endpoint_set_ = true;
+  } else if (udp_source_endpoint_.port() != udp_client_endpoint_.port()) {
+    return StartUdpRead();
+  }
 
   HostPortPair destination;
   std::string_view payload;
