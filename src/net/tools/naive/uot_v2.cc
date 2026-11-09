@@ -16,9 +16,9 @@ bool AppendAddress(std::string_view host,
   IPAddress ip;
   if (ip.AssignFromIPLiteral(host)) {
     if (ip.IsIPv4()) {
-      output->push_back(packet_address ? '\\x00' : '\\x01');
+      output->push_back(packet_address ? '\x00' : '\x01');
     } else if (ip.IsIPv6()) {
-      output->push_back(packet_address ? '\\x01' : '\\x04');
+      output->push_back(packet_address ? '\x01' : '\x04');
     } else {
       return false;
     }
@@ -29,7 +29,7 @@ bool AppendAddress(std::string_view host,
     if (host.empty() || host.size() > 255) {
       return false;
     }
-    output->push_back(packet_address ? '\\x02' : '\\x03');
+    output->push_back(packet_address ? '\x02' : '\x03');
     output->push_back(static_cast<char>(host.size()));
     output->append(host);
   }
@@ -93,7 +93,7 @@ bool ConsumeAddress(std::string_view* input,
 std::string MakeUotV2Request(bool is_connect,
                              const HostPortPair& destination) {
   std::string output;
-  output.push_back(is_connect ? '\\x01' : '\\x00');
+  output.push_back(is_connect ? '\x01' : '\x00');
   if (!AppendAddress(destination.host(), destination.port(), false, &output)) {
     return {};
   }
@@ -153,7 +153,7 @@ bool ConsumeUotV2Frame(std::string* input,
 bool EncodeSocks5UdpDatagram(const HostPortPair& destination,
                              std::string_view payload,
                              std::string* output) {
-  output->assign("\\x00\\x00\\x00", 3);
+  output->assign("\x00\x00\x00", 3);
   if (!AppendAddress(destination.host(), destination.port(), false, output)) {
     return false;
   }
@@ -164,8 +164,8 @@ bool EncodeSocks5UdpDatagram(const HostPortPair& destination,
 bool DecodeSocks5UdpDatagram(std::string_view packet,
                              HostPortPair* destination,
                              std::string_view* payload) {
-  if (packet.size() < 4 || packet[0] != '\\x00' ||
-      packet[1] != '\\x00' || packet[2] != '\\x00') {
+  if (packet.size() < 4 || packet[0] != '\x00' ||
+      packet[1] != '\x00' || packet[2] != '\x00') {
     return false;
   }
   packet.remove_prefix(3);
